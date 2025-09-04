@@ -57,7 +57,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # --- START OF DISK SPACE CLEANUP (Your excellent addition) ---
+    # --- START OF DISK SPACE CLEANUP ---
     - name: Free disk space (1/3) - Manual Cleanup
       run: |
         echo "Initial disk space:"
@@ -120,15 +120,26 @@ jobs:
 
         if [ ! -s "stock_firmware.zip" ]; then echo "✗ CRITICAL ERROR: Failed to download or find stock firmware." && exit 1; fi
 
-        # Extract only the AP file to save space and time
+        # Find the AP filename from the zip archive contents
         AP_FILENAME=$(unzip -l "stock_firmware.zip" | grep -o -E "AP_[A-Z0-9_]+\.tar\.md5" | head -n 1)
+
+        # Your excellent check: if the AP file is not found, print debug info and exit.
+        if [ -z "$AP_FILENAME" ]; then
+            echo "✗ Error: AP file not found in stock_firmware.zip."
+            echo "Listing contents for debugging:"
+            unzip -l "stock_firmware.zip"
+            exit 1
+        fi
+
+        # Extract ONLY the AP file. -j junks the path, placing it in the current dir.
         unzip -o -j "stock_firmware.zip" "$AP_FILENAME"
-        rm "stock_firmware.zip" # Remove the large zip file immediately
+        
+        # CRITICAL: Immediately remove the large zip file to free up disk space.
+        rm "stock_firmware.zip"
 
-        if [ -z "$AP_FILENAME" ]; then echo "✗ Error: AP file not found." && ls -lR && exit 1; fi
-
+        # Now extract the super.img from the AP tarball
         tar -xvf "$AP_FILENAME" --wildcards '*super.img*.lz4'
-        rm "$AP_FILENAME"
+        rm "$AP_FILENAME" # Clean up the AP tarball as well
 
         SUPER_LZ4=$(ls *super.img*.lz4 | head -n 1)
         lz4 -d "$SUPER_LZ4" stock_super_sparse.img

@@ -1,5 +1,4 @@
 # A descriptive name for the workflow, shown in the GitHub Actions UI.
-# This name helps identify the workflow in the "Actions" tab of the repository.
 name: Android Super Partition Repack (Build & Release)
 
 # This section defines how the workflow is triggered.
@@ -9,9 +8,14 @@ on:
   workflow_dispatch:
     # 'inputs' defines the parameters you can provide when running the workflow manually.
     inputs:
-      stock_firmware_url:
-        description: 'URL to the stock firmware (Direct HTTP, MEGA.nz, etc.).'
+      for_samsung_a04s:
+        description: 'Use pre-configured Samsung A04s firmware? (Ignores Stock Firmware URL input)'
         required: true
+        type: boolean
+        default: false
+      stock_firmware_url:
+        description: 'URL to the stock firmware (Direct HTTP, MEGA.nz, etc.). Required if A04s is not selected.'
+        required: false # This is now optional and validated in the first step.
         type: string
       custom_system_url:
         description: 'Custom ROM download URL (.img, .img.xz, .zip supported)'
@@ -52,7 +56,7 @@ on:
         type: boolean
         default: true
 
-# A workflow is made up of one or more 'jobs'. This job is named 'repack-super'.
+# A workflow is made up of one or more 'jobs'.
 jobs:
   repack-super:
     # 'runs-on' specifies the type of virtual machine to run the job on.
@@ -76,11 +80,21 @@ jobs:
         echo "Disk space after manual cleanup:"
         df -h
 
-    # This step installs the necessary dependencies for the script to run.
+    # This step installs the necessary dependencies, including gdown for Google Drive.
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y android-sdk-libsparse-utils tar xz-utils liblz4-tool unzip p7zip-full file wget curl megatools f2fs-tools
+        sudo apt-get install -y android-sdk-libsparse-utils tar xz-utils liblz4-tool unzip p7zip-full file wget curl megatools f2fs-tools python3-pip
+        pip install gdown
+
+    # This new step validates user inputs to ensure the workflow can proceed.
+    - name: Validate Inputs
+      run: |
+        if [[ "${{ github.event.inputs.for_samsung_a04s }}" == "false" && -z "${{ github.event.inputs.stock_firmware_url }}" ]]; then
+          echo "✗ Error: Stock Firmware URL is required when 'For Samsung A04s' is not selected."
+          exit 1
+        fi
+        echo "==> Input validation passed."
 
     # This step ensures the main script is present and executable.
     - name: Verify and Prepare Script
@@ -92,32 +106,51 @@ jobs:
     - name: Create working directory
       run: mkdir -p work
 
-    # This step generates a unique hash of the firmware URL for caching.
+    # This step generates a unique hash of the firmware URL for caching (only if not A04s).
     - name: Generate Firmware URL Hash for Cache
+      if: github.event.inputs.for_samsung_a04s == 'false'
       id: generate_hash
       run: |
         echo "fw_hash=$(echo -n "${{ github.event.inputs.stock_firmware_url }}" | md5sum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
-    # This step caches the downloaded stock firmware to speed up subsequent runs.
+    # This step caches the downloaded stock firmware to speed up subsequent runs (only if not A04s).
     - name: Cache Stock Firmware
+      if: github.event.inputs.for_samsung_a04s == 'false'
       id: cache-stock
       uses: actions/cache@v4
       with:
         path: work/stock_firmware.zip
         key: ${{ runner.os }}-stock-${{ steps.generate_hash.outputs.fw_hash }}
 
-    # This step downloads and extracts the stock super.img.
+    # This step downloads and extracts the stock super.img based on the user's choice.
     - name: Download and Extract Stock Firmware
       run: |
         cd work
-        FIRMWARE_URL="${{ github.event.inputs.stock_firmware_url }}"
-        if [ "${{ steps.cache-stock.outputs.cache-hit }}" != 'true' ]; then
-          echo "==> No cache hit. Downloading stock firmware..."
-          if [[ $FIRMWARE_URL == *"mega.nz"* ]]; then megadl -o stock_firmware.zip "$FIRMWARE_URL"; else wget --user-agent="Mozilla/5.0" --content-disposition -O stock_firmware.zip --tries=5 --wait=10 "$FIRMWARE_URL"; fi
+        # --- Conditional Download Logic ---
+        if [[ "${{ github.event.inputs.for_samsung_a04s }}" == "true" ]]; then
+          echo "==> Using pre-configured Samsung A04s firmware."
+          # Download using gdown with the provided Google Drive file ID.
+          gdown --output stock_firmware.zip '1j27zk_T6cfUcJ-AQHX9DeeXLxQaMOM8p'
         else
-          echo "==> Stock firmware cache was successfully restored."
+          echo "==> Using provided Stock Firmware URL."
+          FIRMWARE_URL="${{ github.event.inputs.stock_firmware_url }}"
+          # This condition checks if the cache was restored in the previous step.
+          if [ "${{ steps.cache-stock.outputs.cache-hit }}" != 'true' ]; then
+            echo "==> No cache hit. Downloading stock firmware..."
+            if [[ $FIRMWARE_URL == *"mega.nz"* ]]; then
+              megadl -o stock_firmware.zip "$FIRMWARE_URL"
+            else
+              wget --user-agent="Mozilla/5.0" --content-disposition -O stock_firmware.zip --tries=5 --wait=10 "$FIRMWARE_URL"
+            fi
+          else
+              echo "==> Stock firmware cache was successfully restored."
+          fi
         fi
+        # --- End of Conditional Download Logic ---
+
         if [ ! -s "stock_firmware.zip" ]; then echo "✗ CRITICAL ERROR: Failed to download or find stock firmware." && exit 1; fi
+        
+        # The rest of the extraction process is the same for both cases.
         AP_FILENAME=$(unzip -l "stock_firmware.zip" | grep -i -o -E "AP_.*\.tar\.md5" | head -n 1)
         if [ -z "$AP_FILENAME" ]; then echo "✗ Error: AP file not found."; unzip -l "stock_firmware.zip"; exit 1; fi
         unzip -o -j "stock_firmware.zip" "$AP_FILENAME"
@@ -152,17 +185,13 @@ jobs:
         esac
         if [ ! -f "custom_system.img" ]; then echo "✗ Error: custom_system.img not created." && exit 1; fi
 
-    # NEW STEP: Ensure the image is a raw image to guarantee it can be mounted.
-    # This fixes the "bad superblock" error by converting sparse images that were misidentified.
+    # This step ensures the image is a raw image to guarantee it can be mounted.
     - name: Convert to Raw Image (if necessary)
       run: |
         cd work
         echo "==> Ensuring custom_system.img is a raw image..."
-        # Create a temporary name for the output.
         mv custom_system.img custom_system.temp.img
-        # simg2img will convert a sparse image to raw, or just copy a raw image.
         simg2img custom_system.temp.img custom_system.img
-        # Clean up the temporary file.
         rm custom_system.temp.img
         echo "==> Conversion complete."
 
@@ -220,14 +249,13 @@ jobs:
         ./repacksuper.sh ${{ steps.prepare_flags.outputs.flags }} work/stock_super_sparse.img work/custom_system.img work/repacked_super.img
         rm -f work/stock_super_sparse.img work/custom_system.img
 
-    # This step verifies, renames, and creates an uncompressed tarball as requested.
+    # This step verifies, renames, and creates an uncompressed tarball.
     - name: Verify, Rename, and Create Tarball
       id: create_tarball
       run: |
         cd work
         if [ ! -f "repacked_super.img" ]; then echo "✗ Error: repacked_super.img not found." && ls -la && exit 1; fi
         mv repacked_super.img super.img
-        # Create an uncompressed tarball (-cvf) as requested.
         TARBALL_NAME="repacked_super_$(date +%Y%m%d).tar"
         tar -cvf "$TARBALL_NAME" super.img
         rm super.img
@@ -252,7 +280,7 @@ jobs:
           ## Repacked Super Image
           This release was generated automatically by the GitHub Actions workflow.
           ### Source Files
-          *   **Stock Firmware:** `${{ github.event.inputs.stock_firmware_url }}`
+          *   **Stock Firmware:** `${{ github.event.inputs.for_samsung_a04s == 'true' && 'Pre-configured for Samsung A04s' || github.event.inputs.stock_firmware_url }}`
           *   **Custom ROM:** `${{ github.event.inputs.custom_system_url }}`
         files: ${{ steps.create_tarball.outputs.tarball_path }}
         draft: false

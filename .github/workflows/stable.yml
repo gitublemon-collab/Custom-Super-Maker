@@ -186,8 +186,7 @@ jobs:
         name: repacked-super-img
         path: |
           work/repacked_super.img
-          work/repacked_super.tar
-        retention-days: 7
+        retention-days: 60
 
     - name: Final Space Check
       if: always()

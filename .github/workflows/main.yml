@@ -196,30 +196,39 @@ jobs:
         fi
         echo "==> Image is ready for the next step."
 
-    # This step modifies the build.prop file inside the custom system image for branding.
-    - name: Modify build.prop for Branding
+    # This step modifies the build.prop file inside the custom system image for branding using Docker.
+    - name: Modify build.prop for Branding (Docker Method)
       run: |
         cd work
-        echo "==> Detecting filesystem type for custom_system.img..."
-        FS_TYPE=$(sudo blkid -o value -s TYPE custom_system.img 2>/dev/null)
+        echo "==> Using Docker with privileged mode to modify build.prop..."
+        
+        # Create a simple script for the Docker container
+        cat > modify_buildprop.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        echo "==> Inside Docker container - detecting filesystem type..."
+        FS_TYPE=$(blkid -o value -s TYPE /host/custom_system.img 2>/dev/null || echo "unknown")
         echo "==> Filesystem detected: ${FS_TYPE:-'Unknown'}"
+        
         case "$FS_TYPE" in
           "ext4"|"f2fs")
             echo "==> Filesystem is '$FS_TYPE'. Attempting to mount for modification..."
-            mkdir -p mnt_system
-            if sudo mount -t "$FS_TYPE" -o loop custom_system.img mnt_system; then
-              echo "==> Mount successful."
-              if [ -f "mnt_system/system/build.prop" ]; then
+            mkdir -p /mnt_system
+            if mount -t "$FS_TYPE" -o loop /host/custom_system.img /mnt_system; then
+              echo "==> Mount successful inside Docker container."
+              if [ -f "/mnt_system/system/build.prop" ]; then
                 echo "==> Modifying build.prop..."
-                sudo sed -i 's|ro.build.id=.*|ro.build.id=Built.By.Minh2077.Script|g' mnt_system/system/build.prop
-                echo "==> build.prop modified."
+                sed -i 's|ro.build.id=.*|ro.build.id=Built.By.Minh2077.Script|g' /mnt_system/system/build.prop
+                echo "==> build.prop modified successfully."
+                sync  # Ensure changes are written to disk
               else
-                echo "⚠️ Warning: build.prop not found at mnt_system/system/build.prop. Skipping."
+                echo "⚠️ Warning: build.prop not found at /mnt_system/system/build.prop. Skipping."
               fi
-              sudo umount mnt_system
-              rm -rf mnt_system
+              umount /mnt_system
+              echo "==> Unmounted successfully."
             else
-              echo "✗ Warning: Failed to mount the $FS_TYPE image. Skipping build.prop modification."
+              echo "✗ Warning: Failed to mount the $FS_TYPE image even in Docker. Skipping build.prop modification."
             fi
             ;;
           "erofs")
@@ -229,6 +238,23 @@ jobs:
             echo "⚠️ Warning: Unsupported or unknown filesystem ('${FS_TYPE:-'Unknown'}'). Skipping modification."
             ;;
         esac
+        EOF
+        
+        chmod +x modify_buildprop.sh
+        
+        # Run the modification inside a privileged Docker container
+        docker run --rm --privileged \
+          -v "$(pwd):/host" \
+          -v "$(pwd)/modify_buildprop.sh:/modify_buildprop.sh" \
+          ubuntu:22.04 \
+          bash -c "
+            apt-get update -qq && 
+            apt-get install -y -qq util-linux file && 
+            /modify_buildprop.sh
+          "
+        
+        rm -f modify_buildprop.sh
+        echo "==> Docker-based build.prop modification completed."
 
     # This step prepares the command-line flags for the 'repacksuper.sh' script.
     - name: Prepare repacksuper.sh flags

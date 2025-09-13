@@ -196,65 +196,136 @@ jobs:
         fi
         echo "==> Image is ready for the next step."
 
-    # This step modifies the build.prop file inside the custom system image for branding using Docker.
-    - name: Modify build.prop for Branding (Docker Method)
+    # This step modifies the build.prop file using multiple fallback methods
+    - name: Modify build.prop for Branding (Multi-Method Approach)
       run: |
         cd work
-        echo "==> Using Docker with privileged mode to modify build.prop..."
+        echo "==> Attempting build.prop modification with multiple methods..."
         
-        # Create a simple script for the Docker container
-        cat > modify_buildprop.sh << 'EOF'
+        # Create an advanced script that tries multiple approaches
+        cat > advanced_modify.sh << 'EOF'
         #!/bin/bash
-        set -e
         
-        echo "==> Inside Docker container - detecting filesystem type..."
-        FS_TYPE=$(blkid -o value -s TYPE /host/custom_system.img 2>/dev/null || echo "unknown")
-        echo "==> Filesystem detected: ${FS_TYPE:-'Unknown'}"
+        IMAGE_PATH="/host/custom_system.img"
+        SUCCESS=false
         
-        case "$FS_TYPE" in
-          "ext4"|"f2fs")
-            echo "==> Filesystem is '$FS_TYPE'. Attempting to mount for modification..."
+        echo "==> Method 1: Standard loop mount with explicit loop device"
+        # Try creating explicit loop device first
+        LOOP_DEV=$(losetup -f)
+        echo "==> Using loop device: $LOOP_DEV"
+        if losetup "$LOOP_DEV" "$IMAGE_PATH"; then
+          echo "==> Loop device created successfully"
+          
+          # Detect filesystem
+          FS_TYPE=$(blkid -o value -s TYPE "$LOOP_DEV" 2>/dev/null || echo "unknown")
+          echo "==> Filesystem detected on loop device: $FS_TYPE"
+          
+          if [[ "$FS_TYPE" == "ext4" || "$FS_TYPE" == "f2fs" ]]; then
             mkdir -p /mnt_system
-            if mount -t "$FS_TYPE" -o loop /host/custom_system.img /mnt_system; then
-              echo "==> Mount successful inside Docker container."
+            if mount -t "$FS_TYPE" "$LOOP_DEV" /mnt_system; then
+              echo "==> Mount successful with explicit loop device"
               if [ -f "/mnt_system/system/build.prop" ]; then
-                echo "==> Modifying build.prop..."
+                echo "==> Found build.prop, modifying..."
                 sed -i 's|ro.build.id=.*|ro.build.id=Built.By.Minh2077.Script|g' /mnt_system/system/build.prop
-                echo "==> build.prop modified successfully."
-                sync  # Ensure changes are written to disk
-              else
-                echo "⚠️ Warning: build.prop not found at /mnt_system/system/build.prop. Skipping."
+                echo "==> build.prop modified successfully!"
+                SUCCESS=true
               fi
+              sync
               umount /mnt_system
-              echo "==> Unmounted successfully."
+              echo "==> Unmounted successfully"
             else
-              echo "✗ Warning: Failed to mount the $FS_TYPE image even in Docker. Skipping build.prop modification."
+              echo "==> Failed to mount with explicit loop device"
             fi
-            ;;
-          "erofs")
-            echo "⚠️ Warning: Filesystem is EROFS (read-only). Modification is not possible. Skipping."
-            ;;
-          *)
-            echo "⚠️ Warning: Unsupported or unknown filesystem ('${FS_TYPE:-'Unknown'}'). Skipping modification."
-            ;;
-        esac
+          fi
+          losetup -d "$LOOP_DEV"
+        else
+          echo "==> Failed to create loop device"
+        fi
+        
+        if [ "$SUCCESS" = false ]; then
+          echo "==> Method 2: Using e2fsck to check and potentially fix image"
+          # Sometimes the image needs a filesystem check
+          if command -v e2fsck >/dev/null 2>&1; then
+            echo "==> Running e2fsck to check/fix image..."
+            e2fsck -f -y "$IMAGE_PATH" || echo "==> e2fsck completed (exit code $?)"
+            
+            # Try mounting again after fsck
+            LOOP_DEV=$(losetup -f)
+            if losetup "$LOOP_DEV" "$IMAGE_PATH"; then
+              mkdir -p /mnt_system
+              if mount -t ext4 "$LOOP_DEV" /mnt_system; then
+                echo "==> Mount successful after e2fsck"
+                if [ -f "/mnt_system/system/build.prop" ]; then
+                  sed -i 's|ro.build.id=.*|ro.build.id=Built.By.Minh2077.Script|g' /mnt_system/system/build.prop
+                  echo "==> build.prop modified successfully after e2fsck!"
+                  SUCCESS=true
+                fi
+                sync
+                umount /mnt_system
+              fi
+              losetup -d "$LOOP_DEV"
+            fi
+          fi
+        fi
+        
+        if [ "$SUCCESS" = false ]; then
+          echo "==> Method 3: Using debugfs for ext4 images (read-only approach)"
+          if command -v debugfs >/dev/null 2>&1; then
+            FS_TYPE=$(blkid -o value -s TYPE "$IMAGE_PATH" 2>/dev/null)
+            if [ "$FS_TYPE" = "ext4" ]; then
+              echo "==> Attempting to read build.prop with debugfs..."
+              if echo "cat /system/build.prop" | debugfs "$IMAGE_PATH" 2>/dev/null | grep -q "ro.build.id"; then
+                echo "==> Found build.prop via debugfs, but cannot modify (read-only method)"
+                echo "==> Creating a note that build.prop exists but modification failed"
+                echo "BUILD_PROP_EXISTS=true" >> /host/build_prop_status.txt
+              fi
+            fi
+          fi
+        fi
+        
+        if [ "$SUCCESS" = true ]; then
+          echo "SUCCESS=true" >> /host/build_prop_status.txt
+          echo "==> ✅ build.prop modification completed successfully!"
+        else
+          echo "SUCCESS=false" >> /host/build_prop_status.txt
+          echo "==> ❌ All methods failed. This might be due to:"
+          echo "    - Image corruption"
+          echo "    - Unsupported filesystem"
+          echo "    - Missing system partition structure"
+          echo "    - Read-only filesystem (EROFS, squashfs, etc.)"
+        fi
         EOF
         
-        chmod +x modify_buildprop.sh
+        chmod +x advanced_modify.sh
         
-        # Run the modification inside a privileged Docker container
+        # Run with even more privileges and additional tools
         docker run --rm --privileged \
+          --device-cgroup-rule="a *:* rmw" \
           -v "$(pwd):/host" \
-          -v "$(pwd)/modify_buildprop.sh:/modify_buildprop.sh" \
+          -v "$(pwd)/advanced_modify.sh:/advanced_modify.sh" \
           ubuntu:22.04 \
           bash -c "
-            apt-get update -qq && 
-            apt-get install -y -qq util-linux file && 
-            /modify_buildprop.sh
+            echo '==> Installing comprehensive toolset...'
+            apt-get update -qq
+            apt-get install -y -qq util-linux file e2fsprogs f2fs-tools debugfs
+            echo '==> Running advanced modification script...'
+            /advanced_modify.sh
           "
         
-        rm -f modify_buildprop.sh
-        echo "==> Docker-based build.prop modification completed."
+        # Check results
+        if [ -f "build_prop_status.txt" ]; then
+          echo "==> Checking modification results..."
+          cat build_prop_status.txt
+          if grep -q "SUCCESS=true" build_prop_status.txt; then
+            echo "✅ Build.prop was successfully modified!"
+          else
+            echo "⚠️ Build.prop modification failed, but continuing with workflow..."
+          fi
+          rm -f build_prop_status.txt
+        fi
+        
+        rm -f advanced_modify.sh
+        echo "==> Advanced build.prop modification process completed."
 
     # This step prepares the command-line flags for the 'repacksuper.sh' script.
     - name: Prepare repacksuper.sh flags

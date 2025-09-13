@@ -128,7 +128,7 @@ jobs:
         cd work
         if [[ "${{ github.event.inputs.for_samsung_a04s }}" == "true" ]]; then
           echo "==> Using pre-configured Samsung A04s firmware."
-          gdown --output stock_firmware.zip '1j2z7k_T6cfUcJ-AQHX9DeeXLxQaMOM8p'
+          gdown --output stock_firmware.zip '1j27zk_T6cfUcJ-AQHX9DeeXLxQaMOM8p'
         else
           echo "==> Using provided Stock Firmware URL."
           FIRMWARE_URL="${{ github.event.inputs.stock_firmware_url }}"

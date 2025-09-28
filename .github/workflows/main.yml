@@ -87,12 +87,15 @@ jobs:
       with:
         retain: 'compiler_cmake'
 
-    # This step installs the necessary dependencies, including gdown for Google Drive.
+    # This step installs the necessary dependencies, including gdown for Google Drive and Docker.
     - name: Install Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y android-sdk-libsparse-utils tar xz-utils liblz4-tool unzip p7zip-full file wget curl megatools f2fs-tools python3-pip
         pip install gdown
+        # Install Docker because it is needed for the build.prop modification step
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sudo sh get-docker.sh
 
     # This step validates user inputs to ensure the workflow can proceed.
     - name: Validate Inputs

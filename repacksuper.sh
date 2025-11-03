@@ -845,7 +845,7 @@ fi
 echo "(Re)packing..."
 "$lptools_path"/lpmake --metadata-size $metadata_max_size --super-name super --metadata-slots 2 \
   --device super:$block_device_table_size --group $system_group:$groups_max_size \
-  --partition system:readonly:$system_size:$system_group --image system="$new_system" \
+  --partition system:$attrs:$system_size:$system_group --image system="$new_system" \
   ${system_ext_size:+--partition system_ext:$attrs:$system_ext_size:$system_ext_group --image system_ext="$system_ext_img"} \
   ${odm_size:+--partition odm:$attrs:$odm_size:$odm_group --image odm="$super_dir/odm.img"} \
   ${odlkm_size:+--partition odm_dlkm:$attrs:$odlkm_size:$odlkm_group --image odm_dlkm="$super_dir/odm_dlkm.img"} \

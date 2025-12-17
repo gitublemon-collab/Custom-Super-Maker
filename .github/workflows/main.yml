@@ -1,378 +1,200 @@
-# A descriptive name for the workflow, shown in the GitHub Actions UI.
-name: Android Super Partition Repack (Build & Release)
+name: Android Super Repack (Universal FS)
 
-# This section defines how the workflow is triggered.
 on:
-  # 'workflow_dispatch' allows you to run this workflow manually from the
-  # "Actions" tab in your GitHub repository.
   workflow_dispatch:
-    # 'inputs' defines the parameters you can provide when running the workflow manually.
     inputs:
       for_samsung_a04s:
-        description: 'Use pre-configured Samsung A04s firmware? (Ignores Stock Firmware URL input)'
+        description: 'Use pre-configured Samsung A04s firmware?'
         required: true
         type: boolean
         default: false
       stock_firmware_url:
-        description: 'URL to the stock firmware (Direct HTTP, MEGA.nz, etc.). Required if A04s is not selected.'
-        required: false # Validated in the first step.
+        description: 'Stock Firmware URL (Required if not A04s)'
+        required: false
         type: string
       custom_system_url:
-        description: 'Custom ROM download URL (.img, .img.xz, .zip supported)'
+        description: 'Custom ROM URL (LineageOS, etc.)'
         required: true
         type: string
       upload_to_release:
-        description: 'Upload the final artifact as a GitHub Release?'
+        description: 'Upload to Release?'
         required: true
         type: boolean
         default: true
-      no_flash_flag:
-        description: 'The flag to prevent the script from trying to flash (e.g., -n, --no-flash). Leave blank if none.'
-        required: false
-        type: string
       empty_product:
-        description: 'Use empty product.img (-e flag)'
+        description: 'Use empty product.img (-e)'
         required: false
         type: boolean
         default: false
       empty_system_ext:
-        description: 'Use empty system_ext.img (-x flag)'
+        description: 'Use empty system_ext.img (-x)'
         required: false
         type: boolean
         default: false
       silent_mode:
-        description: 'Silent mode for the script (-s flag)'
+        description: 'Silent mode (-s)'
         required: false
         type: boolean
         default: true
       writable:
-        description: 'Make partitions writable (-w flag)'
+        description: 'Make partitions writable (-w)'
         required: false
         type: boolean
         default: false
-      purge_all:
-        description: 'Purge repacksuper directory after use (-p flag)'
-        required: false
-        type: boolean
-        default: true
 
-# A workflow is made up of one or more 'jobs'.
 jobs:
   repack-super:
-    # 'runs-on' specifies the type of virtual machine to run the job on.
     runs-on: ubuntu-latest
-    # 'permissions' are required to create GitHub Releases.
     permissions:
       contents: write
-    # 'steps' are a sequence of tasks that will be executed as part of the job.
     steps:
-    # This step checks out a copy of your repository onto the runner.
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # --- START OF DISK SPACE CLEANUP ---
-    - name: Free disk space (1/3)
-      run: |
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
-        sudo docker builder prune -a
-
-    - name: Free disk space (2/3)
+    # Disk Cleanup to prevent running out of space during repack
+    - name: Free disk space
       uses: jlumbroso/free-disk-space@main
       with:
         tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        swap-storage: true
 
-    - name: Free disk space (3/3)
-      uses: rokibhasansagar/slimhub_actions@main
-      with:
-        retain: 'compiler_cmake'
-
-    # This step installs the necessary dependencies, including gdown for Google Drive and Docker.
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y android-sdk-libsparse-utils tar xz-utils liblz4-tool unzip p7zip-full file wget curl megatools f2fs-tools python3-pip
+        # Added 'erofs-utils' for modern android support and 'android-sdk-libsparse-utils' for simg2img
+        sudo apt-get install -y android-sdk-libsparse-utils tar xz-utils liblz4-tool unzip p7zip-full file wget curl megatools f2fs-tools erofs-utils python3-pip
         pip install gdown
-        # Install Docker because it is needed for the build.prop modification step
         curl -fsSL https://get.docker.com -o get-docker.sh
         sudo sh get-docker.sh
 
-    # This step validates user inputs to ensure the workflow can proceed.
-    - name: Validate Inputs
-      run: |
-        if [[ "${{ github.event.inputs.for_samsung_a04s }}" == "false" && -z "${{ github.event.inputs.stock_firmware_url }}" ]]; then
-          echo "✗ Error: Stock Firmware URL is required when 'For Samsung A04s' is not selected."
-          exit 1
-        fi
-        echo "==> Input validation passed."
-
-    # This step ensures the main script is present and executable.
     - name: Verify and Prepare Script
       run: |
         if [ ! -f "./repacksuper.sh" ]; then echo "✗ Error: repacksuper.sh not found" && exit 1; fi
         chmod +x ./repacksuper.sh
+        mkdir -p work
 
-    # This step creates a dedicated directory for all the work.
-    - name: Create working directory
-      run: mkdir -p work
-
-    # This step generates a unique hash of the firmware URL for caching (only if not A04s).
-    - name: Generate Firmware URL Hash for Cache
-      if: github.event.inputs.for_samsung_a04s == 'false'
-      id: generate_hash
-      run: |
-        echo "fw_hash=$(echo -n "${{ github.event.inputs.stock_firmware_url }}" | md5sum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-
-    # This step caches the downloaded stock firmware to speed up subsequent runs (only if not A04s).
-    - name: Cache Stock Firmware
-      if: github.event.inputs.for_samsung_a04s == 'false'
-      id: cache-stock
-      uses: actions/cache@v4
-      with:
-        path: work/stock_firmware.zip
-        key: ${{ runner.os }}-stock-${{ steps.generate_hash.outputs.fw_hash }}
-
-    # This step downloads and extracts the stock super.img based on the user's choice.
-    - name: Download and Extract Stock Firmware
+    - name: Download Stock Firmware
       run: |
         cd work
         if [[ "${{ github.event.inputs.for_samsung_a04s }}" == "true" ]]; then
-          echo "==> Using pre-configured Samsung A04s firmware."
           gdown --output stock_firmware.zip '1j27zk_T6cfUcJ-AQHX9DeeXLxQaMOM8p'
         else
-          echo "==> Using provided Stock Firmware URL."
           FIRMWARE_URL="${{ github.event.inputs.stock_firmware_url }}"
-          if [ "${{ steps.cache-stock.outputs.cache-hit }}" != 'true' ]; then
-            echo "==> No cache hit. Downloading stock firmware..."
-            if [[ $FIRMWARE_URL == *"mega.nz"* ]]; then megadl -o stock_firmware.zip "$FIRMWARE_URL"; else wget --user-agent="Mozilla/5.0" --content-disposition -O stock_firmware.zip --tries=5 --wait=10 "$FIRMWARE_URL"; fi
-          else
-            echo "==> Stock firmware cache was successfully restored."
-          fi
+          if [[ $FIRMWARE_URL == *"mega.nz"* ]]; then megadl -o stock_firmware.zip "$FIRMWARE_URL"; else wget --content-disposition -O stock_firmware.zip "$FIRMWARE_URL"; fi
         fi
-        if [ ! -s "stock_firmware.zip" ]; then echo "✗ CRITICAL ERROR: Failed to download or find stock firmware." && exit 1; fi
+        
+        # Robust extraction logic
         AP_FILENAME=$(unzip -l "stock_firmware.zip" | grep -i -o -E "AP_.*\.tar\.md5" | head -n 1)
-        if [ -z "$AP_FILENAME" ]; then echo "✗ Error: AP file not found."; unzip -l "stock_firmware.zip"; exit 1; fi
         unzip -o -j "stock_firmware.zip" "$AP_FILENAME"
         rm "stock_firmware.zip"
+        
         tar -xvf "$AP_FILENAME" --wildcards '*super.img*.lz4'
         rm "$AP_FILENAME"
         SUPER_LZ4=$(ls *super.img*.lz4 | head -n 1)
         lz4 -d "$SUPER_LZ4" stock_super_sparse.img
         rm "$SUPER_LZ4"
-        if [ ! -f "stock_super_sparse.img" ]; then echo "✗ Error: Failed to create sparse stock_super.img." && exit 1; fi
 
-    # This step downloads and prepares the custom system.img.
-    - name: Download and Prepare Custom system.img
+    - name: Download Custom System
       run: |
         cd work
         wget -O custom_rom_package "${{ github.event.inputs.custom_system_url }}"
-        if [ ! -s "custom_rom_package" ]; then echo "✗ Error: Failed to download custom ROM." && exit 1; fi
         FILE_TYPE=$(file -b custom_rom_package)
-        case "$FILE_TYPE" in
-          *"XZ compressed data"*)      mv custom_rom_package c.img.xz && unxz c.img.xz && mv c.img custom_system.img ;;
-          *"Zip archive data"*)
-            unzip -o custom_rom_package ; rm custom_rom_package
-            SYSTEM_IMG_FILE=$(find . -maxdepth 1 -name "system.img" -o -name "system.raw.img" | head -n 1)
-            if [ -z "$SYSTEM_IMG_FILE" ]; then echo "✗ Error: system.img not found in ZIP." && exit 1; fi
-            mv "$SYSTEM_IMG_FILE" custom_system.img ;;
-          *"7z archive data"*)
-            7z x custom_rom_package ; rm custom_rom_package
-            SYSTEM_IMG_FILE=$(find . -maxdepth 1 -name "system.img" -o -name "system.raw.img" | head -n 1)
-            if [ -z "$SYSTEM_IMG_FILE" ]; then echo "✗ Error: system.img not found in 7z archive." && exit 1; fi
-            mv "$SYSTEM_IMG_FILE" custom_system.img ;;
-          *)                            mv custom_rom_package custom_system.img ;;
-        esac
-        if [ ! -f "custom_system.img" ]; then echo "✗ Error: custom_system.img not created." && exit 1; fi
-
-    # REVISED STEP: This now gracefully handles the simg2img error by attempting a conversion
-    # and using the original file if the conversion fails. This is the most robust method.
-    - name: Ensure Raw Image (by attempting conversion)
-      run: |
-        cd work
-        echo "==> Attempting to convert custom_system.img to raw (if it is sparse)..."
-        # Create a backup of the original image.
-        mv custom_system.img custom_system.original.img
         
-        # Attempt the conversion. 'if simg2img...' will check the exit code of the command.
-        if simg2img custom_system.original.img custom_system.img; then
-          # This block executes if simg2img was successful (exit code 0).
-          echo "==> Success: Image was sparse and has been converted to raw."
-          rm custom_system.original.img # Clean up the backup.
-        else
-          # This block executes if simg2img failed (e.g., "Invalid sparse file format").
-          echo "==> Info: simg2img failed, which is expected for a raw image. Using the original file."
-          # Restore the original image since the conversion failed.
-          mv custom_system.original.img custom_system.img
-        fi
-        echo "==> Image is ready for the next step."
+        echo "Detected file type: $FILE_TYPE"
+        
+        case "$FILE_TYPE" in
+          *"XZ compressed"*) mv custom_rom_package c.img.xz && unxz c.img.xz && mv c.img custom_system.img ;;
+          *"Zip archive"*) 
+             unzip -o custom_rom_package 
+             SYSTEM_IMG=$(find . -name "system.img" -o -name "system.raw.img" | head -n 1)
+             mv "$SYSTEM_IMG" custom_system.img 
+             ;;
+          *) mv custom_rom_package custom_system.img ;;
+        esac
 
-    # This step modifies the build.prop file using debugfs for direct ext4 manipulation
-    - name: Modify build.prop for Branding
+    - name: Ensure Raw Image
       run: |
         cd work
-        echo "==> Modifying build.prop using debugfs (direct ext4 manipulation)..."
+        # Attempt conversion if sparse, otherwise keep raw
+        mv custom_system.img custom_system.orig
+        if simg2img custom_system.orig custom_system.img; then
+          echo "Converted sparse to raw."
+          rm custom_system.orig
+        else
+          echo "Image is likely already raw or EROFS. Using original."
+          mv custom_system.orig custom_system.img
+        fi
+
+    - name: Branding Injection (Smart Mode)
+      run: |
+        cd work
+        echo "==> Checking filesystem type for branding..."
         
         docker run --rm --privileged \
           -v "$(pwd):/work" \
           ubuntu:22.04 \
           bash -c '
-            apt-get update -qq
-            apt-get install -y -qq e2fsprogs util-linux
-            
+            apt-get update -qq && apt-get install -y -qq e2fsprogs util-linux file
             cd /work
-            echo "==> Detecting filesystem type..."
+            
+            # Identify Filesystem
             FS_TYPE=$(blkid -o value -s TYPE custom_system.img 2>/dev/null || echo "unknown")
-            echo "==> Filesystem detected: $FS_TYPE"
+            echo "Filesystem detected: $FS_TYPE"
             
             if [ "$FS_TYPE" = "ext4" ]; then
-              echo "==> Using debugfs to modify build.prop directly..."
+              echo "==> EXT4 detected. Injecting branding via debugfs..."
+              echo "cat /system/build.prop" | debugfs custom_system.img > current_build.prop 2>/dev/null
               
-              # First, extract the current build.prop
-              echo "==> Extracting current build.prop..."
-              echo "cat /system/build.prop" | debugfs custom_system.img > current_build.prop 2>/dev/null || {
-                echo "==> Failed to extract build.prop, skipping modification"
-                exit 0
-              }
-              
-              # Check if build.prop was extracted successfully
-              if [ -s current_build.prop ] && grep -q "ro.build" current_build.prop; then
-                echo "==> Build.prop extracted successfully"
-                
-                # Modify the build.prop file
-                sed -i "s|ro\.build\.id=.*|ro.build.id=Built.By.Minh2077.Script|g" current_build.prop
-                echo "==> Build.prop modified"
-                
-                # Write it back using debugfs
-                echo "==> Writing modified build.prop back to image..."
-                {
-                  echo "cd /system"
-                  echo "rm build.prop"
-                  echo "write current_build.prop build.prop"
-                  echo "quit"
-                } | debugfs -w custom_system.img
-                
-                echo "==> Verifying modification..."
-                echo "cat /system/build.prop" | debugfs custom_system.img | grep "ro.build.id" || echo "==> Verification failed"
-                
-                rm -f current_build.prop
-                echo "==> Build.prop modification completed successfully using debugfs"
+              if [ -s current_build.prop ]; then
+                 sed -i "s|ro\.build\.id=.*|ro.build.id=Built.By.Minh2077.Script|g" current_build.prop
+                 echo "cd /system" > script.debugfs
+                 echo "rm build.prop" >> script.debugfs
+                 echo "write current_build.prop build.prop" >> script.debugfs
+                 echo "quit" >> script.debugfs
+                 debugfs -w -f script.debugfs custom_system.img
+                 echo "==> Branding injected successfully."
               else
-                echo "==> Could not extract valid build.prop, skipping modification"
+                 echo "==> Could not extract build.prop. Skipping."
               fi
-            elif [ "$FS_TYPE" = "f2fs" ]; then
-              echo "==> F2FS filesystem detected - attempting simple mount with f2fs support..."
-              apt-get install -y -qq f2fs-tools
-              
-              LOOP_DEV=$(losetup -f)
-              losetup "$LOOP_DEV" custom_system.img
-              
-              mkdir -p /mnt_system
-              if mount -t f2fs "$LOOP_DEV" /mnt_system 2>/dev/null; then
-                echo "==> F2FS mount successful"
-                if [ -f "/mnt_system/system/build.prop" ]; then
-                  sed -i "s|ro\.build\.id=.*|ro.build.id=Built.By.Minh2077.Script|g" /mnt_system/system/build.prop
-                  echo "==> Build.prop modified successfully on F2FS"
-                fi
-                sync
-                umount /mnt_system
-              else
-                echo "==> F2FS mount failed, skipping modification"
-              fi
-              
-              losetup -d "$LOOP_DEV"
+            elif [ "$FS_TYPE" = "erofs" ]; then
+               echo "==> EROFS detected. This is Read-Only."
+               echo "==> Skipping branding injection to prevent build failure."
+               echo "==> To modify EROFS, full unpack/repack tools are required which is experimental."
             else
-              echo "==> Unsupported filesystem ($FS_TYPE), skipping modification"
+               echo "==> Unknown or Generic filesystem ($FS_TYPE). Skipping branding."
             fi
           '
-        
-        echo "==> Build.prop modification process completed."
 
-    # This step prepares the command-line flags for the 'repacksuper.sh' script.
-    - name: Prepare repacksuper.sh flags
-      id: prepare_flags
+    - name: Run Repack
       run: |
+        # Construct flags
         FLAGS="-r $(pwd)/work"
         if [ "${{ github.event.inputs.silent_mode }}" == "true" ]; then FLAGS="$FLAGS -s"; fi
-        if [ "${{ github.event.inputs.purge_all }}" == "true" ]; then FLAGS="$FLAGS -p"; fi
         if [ "${{ github.event.inputs.empty_product }}" == "true" ]; then FLAGS="$FLAGS -e"; fi
         if [ "${{ github.event.inputs.empty_system_ext }}" == "true" ]; then FLAGS="$FLAGS -x"; fi
         if [ "${{ github.event.inputs.writable }}" == "true" ]; then FLAGS="$FLAGS -w"; fi
-        if [ -n "${{ github.event.inputs.no_flash_flag }}" ]; then FLAGS="$FLAGS ${{ github.event.inputs.no_flash_flag }}"; fi
-        echo "flags=$FLAGS" >> $GITHUB_OUTPUT
+        
+        echo "Running with flags: $FLAGS"
+        ./repacksuper.sh $FLAGS work/stock_super_sparse.img work/custom_system.img work/repacked_super.img
 
-    # This is the core step where the super partition is repacked.
-    - name: Run repacksuper.sh
-      run: |
-        echo "==> Running repacksuper.sh with flags: ${{ steps.prepare_flags.outputs.flags }}"
-        ./repacksuper.sh ${{ steps.prepare_flags.outputs.flags }} work/stock_super_sparse.img work/custom_system.img work/repacked_super.img
-        rm -f work/stock_super_sparse.img work/custom_system.img
-
-    # This step verifies, renames, and creates an uncompressed tarball.
-    - name: Verify, Rename, and Create Tarball
-      id: create_tarball
+    - name: Create Tarball
+      id: package
       run: |
         cd work
-        if [ ! -f "repacked_super.img" ]; then echo "✗ Error: repacked_super.img not found." && ls -la && exit 1; fi
         mv repacked_super.img super.img
-        TARBALL_NAME="repacked_super_$(date +%Y%m%d).tar"
-        tar -cvf "$TARBALL_NAME" super.img
-        rm super.img
-        echo "tarball_path=work/$TARBALL_NAME" >> $GITHUB_OUTPUT
-        echo "tarball_name=$TARBALL_NAME" >> $GITHUB_OUTPUT
+        TAR_NAME="repacked_super_$(date +%Y%m%d).tar"
+        tar -cvf "$TAR_NAME" super.img
+        echo "tar_path=work/$TAR_NAME" >> $GITHUB_OUTPUT
 
-    # This step uploads the final tarball as a workflow artifact.
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: repacked-super-image
-        path: ${{ steps.create_tarball.outputs.tarball_path }}
-
-    # NEW STEP: This splits the tarball into 1.9GB chunks for the release.
-    - name: Split Tarball for Release
-      if: github.event.inputs.upload_to_release == 'true'
-      id: split_files
-      run: |
-        cd work
-        TARBALL_NAME=${{ steps.create_tarball.outputs.tarball_name }}
-        split -b 1900M -d "$TARBALL_NAME" "${TARBALL_NAME}."
-        rm "$TARBALL_NAME"
-        # The 'files' output will be a newline-separated list of the split files.
-        echo "files=$(ls ${TARBALL_NAME}.* | xargs -n 1 -I {} echo "work/{}" | tr '\n' ',')" >> $GITHUB_OUTPUT
-
-    # This step creates a GitHub Release if the user selected the option.
-    - name: Create GitHub Release with Artifact
+    - name: Upload Release
       if: github.event.inputs.upload_to_release == 'true'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: repack-${{ github.run_id }}-${{ github.run_attempt }}
-        name: "Repacked Super Image - ${{ github.run_id }}"
-        body: |
-          ## Repacked Super Image
-          This release was generated automatically by the GitHub Actions workflow.
-
-          **To reassemble the file, download all `repacked_super_*.tar.*` parts and run the following command:**
-          ### On Linux or macOS:
-          ```bash
-          cat repacked_super_*.tar.* > repacked_super.tar
-          ```
-          ### On Windows (Command Prompt):
-          ```cmd
-          copy /b repacked_super_*.tar.* repacked_super.tar
-          ```
-
-          ### Source Files
-          *   **Stock Firmware:** `${{ github.event.inputs.for_samsung_a04s == 'true' && 'Pre-configured for Samsung A04s' || github.event.inputs.stock_firmware_url }}`
-          *   **Custom ROM:** `${{ github.event.inputs.custom_system_url }}`
-        files: ${{ steps.split_files.outputs.files }}
-        draft: false
-        prerelease: false
+        tag_name: build-${{ github.run_id }}
+        files: ${{ steps.package.outputs.tar_path }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      continue-on-error: true
-
-    # This step runs at the end of the job to show final disk space.
-    - name: Final Space Check
-      if: always()
-      run: |
-        echo "Final disk space:"
-        df -h

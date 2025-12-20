@@ -4,6 +4,9 @@ Tired of your Samsung budget phone lagging like it's stuck in molasses? This Git
 
 It replaces the bloated stock system with a lightweight custom ROM by rebuilding your super.img. No complex setup. No terminal sorcery. Just a few clicks and URLs.
 
+STATUS: EXPERIMENTAL
+This workflow is currently in active development and is not yet 100% stable. Please stay tuned for updates. If you encounter bugs, please report them in the Issues tab.
+
 ---
 
 ## 🛠️ Why Is This Even Necessary?

@@ -126,7 +126,7 @@ jobs:
         lz4 -d "$SUPER_LZ4" stock_super_sparse.img
         rm "$SUPER_LZ4"
 
-    - name: Download and Extract Custom System (FIXED)
+    - name: Download and Extract Custom System
       run: |
         cd work
         echo "==> Downloading Custom ROM..."
@@ -264,7 +264,7 @@ jobs:
                 if [ ! -f "$PROP_FILE" ]; then PROP_FILE="$MOUNT_DIR/build.prop"; fi
                 
                 if [ -f "$PROP_FILE" ]; then
-                    sed -i "s|ro\.build\.id=.*|ro.build.id=Built.By.Minh2077.Script|g" "$PROP_FILE"
+                    sed -i "s|ro\.build\.id=.*|ro.build.display.id=Built.By.Minh2077.Script|g" "$PROP_FILE"
                     if ! grep -q "ro.repack.author" "$PROP_FILE"; then
                         echo "" >> "$PROP_FILE"
                         echo "ro.repack.version=v1.0" >> "$PROP_FILE"
